@@ -7,38 +7,22 @@ import {
   type Detection,
 } from './utils/yolo';
 
-// Use the global ort object loaded from CDN script tag
+// Use global ort loaded from CDN in index.html
 declare const ort: any;
-
-// Configure ONNX Runtime to use CDN for WASM files
-if (typeof ort !== 'undefined') {
-  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
-  ort.env.logLevel = 'warning';
-}
-
-// Global error handler to catch and display errors
-if (typeof window !== 'undefined') {
-  window.addEventListener('error', (event) => {
-    console.error('Global error:', event.error);
-  });
-  window.addEventListener('unhandledrejection', (event) => {
-    console.error('Unhandled promise rejection:', event.reason);
-  });
-}
 
 type AppState = 'idle' | 'loading-model' | 'ready' | 'detecting' | 'error';
 
 export default function App() {
+  const [ortReady, setOrtReady] = useState(typeof ort !== 'undefined');
   const [state, setState] = useState<AppState>('idle');
-  const [modelName, setModelName] = useState<string>('');
-  const [errorMsg, setErrorMsg] = useState<string>('');
+  const [modelName, setModelName] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
   const [detections, setDetections] = useState<Detection[]>([]);
-  const [fps, setFps] = useState<number>(0);
-  const [confidence, setConfidence] = useState<number>(0.3);
+  const [fps, setFps] = useState(0);
+  const [confidence, setConfidence] = useState(0.3);
   const [cameraActive, setCameraActive] = useState(false);
   const [modelInfo, setModelInfo] = useState<{ inputs: string; outputs: string; outputDims: string } | null>(null);
   const [showDebug, setShowDebug] = useState(false);
-  const [wasmReady, setWasmReady] = useState(false);
   const [isSecure, setIsSecure] = useState(true);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -53,35 +37,37 @@ export default function App() {
   const confidenceRef = useRef<number>(0.3);
   const outputDimsSetRef = useRef<boolean>(false);
 
-  // Keep confidence ref in sync
   useEffect(() => {
     confidenceRef.current = confidence;
   }, [confidence]);
 
-  // Check HTTPS and test WASM loading on mount
   useEffect(() => {
     const secure = window.location.protocol === 'https:' || 
                    window.location.hostname === 'localhost' || 
                    window.location.hostname === '127.0.0.1';
     setIsSecure(secure);
 
-    // Test WASM loading
-    const testWasm = async () => {
-      try {
-        // Try to create a minimal session to test WASM loading
-        // We just need to verify the runtime can initialize
-        console.log('Testing ONNX Runtime WASM initialization...');
-        setWasmReady(true);
-      } catch (err) {
-        console.error('WASM initialization failed:', err);
-        setErrorMsg(`WASM initialization failed: ${(err as Error).message}. Try refreshing the page.`);
-        setState('error');
-      }
-    };
-    testWasm();
+    // Check if ORT is ready (may not be if CDN script hasn't loaded yet)
+    if (typeof ort === 'undefined') {
+      // Poll for ORT availability
+      const interval = setInterval(() => {
+        if (typeof ort !== 'undefined') {
+          setOrtReady(true);
+          clearInterval(interval);
+        }
+      }, 100);
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        clearInterval(interval);
+        if (typeof ort === 'undefined') {
+          setErrorMsg('Failed to load ONNX Runtime. Please check your internet connection and refresh the page.');
+          setState('error');
+        }
+      }, 10000);
+      return () => clearInterval(interval);
+    }
   }, []);
 
-  // Load model from file
   const loadModel = useCallback(async (file: File) => {
     setState('loading-model');
     setErrorMsg('');
@@ -98,28 +84,33 @@ export default function App() {
 
       sessionRef.current = session;
 
-      // Get model info
       const inputNames = session.inputNames;
       const outputNames = session.outputNames;
       const inputInfos = inputNames.map((name: string) => {
-        const info = session.inputMetadata[name as keyof typeof session.inputMetadata];
-        return `${name}: [${(info as any).dimensions?.join(', ') || '?'}]`;
+        const info = session.inputMetadata[name];
+        return `${name}: [${info?.dimensions?.join(', ') || '?'}]`;
       }).join(', ');
       const outputInfos = outputNames.map((name: string) => {
-        const info = session.outputMetadata[name as keyof typeof session.outputMetadata];
-        return `${name}: [${(info as any).dimensions?.join(', ') || '?'}]`;
+        const info = session.outputMetadata[name];
+        return `${name}: [${info?.dimensions?.join(', ') || '?'}]`;
       }).join(', ');
 
       setModelInfo({ inputs: inputInfos, outputs: outputInfos, outputDims: '' });
       setState('ready');
     } catch (err: any) {
       console.error('Model load error:', err);
-      setErrorMsg(`Failed to load model: ${err.message}`);
+      setErrorMsg(`Failed to load model: ${err.message || err}`);
       setState('error');
     }
   }, []);
 
-  // Start camera
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      loadModel(file);
+    }
+  }, [loadModel]);
+
   const startCamera = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -144,31 +135,29 @@ export default function App() {
     }
   }, []);
 
-  // Stop camera
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = 0;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     setCameraActive(false);
-    setDetections([]);
-    setFps(0);
   }, []);
 
-  // Run detection loop
   const runDetection = useCallback(async () => {
-    if (!sessionRef.current || !videoRef.current || !canvasRef.current || !overlayRef.current || !preprocessCanvasRef.current) {
-      return;
-    }
+    if (!sessionRef.current || !cameraActive) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
     const preprocessCanvas = preprocessCanvasRef.current;
+
+    if (!video || !canvas || !overlay || !preprocessCanvas) {
+      animFrameRef.current = requestAnimationFrame(runDetection);
+      return;
+    }
 
     if (video.readyState < 2) {
       animFrameRef.current = requestAnimationFrame(runDetection);
@@ -182,21 +171,17 @@ export default function App() {
     const videoWidth = video.videoWidth;
     const videoHeight = video.videoHeight;
 
-    // Set canvas sizes
     canvas.width = videoWidth;
     canvas.height = videoHeight;
     overlay.width = videoWidth;
     overlay.height = videoHeight;
 
-    // Draw video frame
     ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
 
-    // Determine input size from model
     const inputName = sessionRef.current.inputNames[0];
-    const inputDims = (sessionRef.current.inputMetadata as any)[inputName]?.dimensions || [1, 3, 640, 640];
-    const inputSize = inputDims[2] || 640; // Assume square input
+    const inputDims = sessionRef.current.inputMetadata[inputName]?.dimensions || [1, 3, 640, 640];
+    const inputSize = inputDims[2] || 640;
 
-    // Preprocess
     preprocessCanvas.width = inputSize;
     preprocessCanvas.height = inputSize;
     const { inputData, ratio, padX, padY } = preprocessImage(
@@ -206,11 +191,9 @@ export default function App() {
       inputSize
     );
 
-    // Create tensor
     const tensor = new ort.Tensor('float32', inputData, [1, 3, inputSize, inputSize]);
 
     try {
-      // Run inference
       const feeds: Record<string, any> = {};
       feeds[inputName] = tensor;
       
@@ -220,18 +203,16 @@ export default function App() {
       const outputData = outputTensor.data as Float32Array;
       const outputDims = outputTensor.dims;
 
-      // Update output dims info on first run
       if (!outputDimsSetRef.current) {
         outputDimsSetRef.current = true;
         setModelInfo(prev => prev ? { ...prev, outputDims: `[${Array.from(outputDims).join(', ')}]` } : null);
       }
 
       let newDetections: Detection[];
-      const dims = Array.from(outputDims) as number[];
+      const dims: number[] = Array.from(outputDims) as number[];
 
-      // Check if output is already in [batch, num_detections, 6] format (YOLOv10)
       if (dims.length === 3 && dims[2] === 6) {
-        const numDetections = dims[1];
+        const numDetections = dims[1] as number;
         newDetections = postprocessDetections(
           outputData,
           numDetections,
@@ -241,8 +222,7 @@ export default function App() {
           confidenceRef.current
         );
       } else if (dims.length === 2 && dims[1] === 6) {
-        // [num_detections, 6] without batch dimension
-        const numDetections = dims[0];
+        const numDetections = dims[0] as number;
         newDetections = postprocessDetections(
           outputData,
           numDetections,
@@ -252,7 +232,6 @@ export default function App() {
           confidenceRef.current
         );
       } else {
-        // Raw output format (e.g., YOLOv8 style)
         newDetections = postprocessRawOutput(
           outputData,
           dims,
@@ -265,19 +244,16 @@ export default function App() {
 
       setDetections(newDetections);
 
-      // Draw detections on overlay
       overlayCtx.clearRect(0, 0, videoWidth, videoHeight);
       newDetections.forEach(det => {
         const color = CLASS_COLORS[det.label] || '#22c55e';
         const w = det.x2 - det.x1;
         const h = det.y2 - det.y1;
 
-        // Draw bounding box
         overlayCtx.strokeStyle = color;
         overlayCtx.lineWidth = 3;
         overlayCtx.strokeRect(det.x1, det.y1, w, h);
 
-        // Draw label background
         const label = `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
         overlayCtx.font = 'bold 16px Arial';
         const textMetrics = overlayCtx.measureText(label);
@@ -285,62 +261,58 @@ export default function App() {
         const textWidth = textMetrics.width + 10;
 
         overlayCtx.fillStyle = color;
-        overlayCtx.fillRect(det.x1, det.y1 - textHeight - 4, textWidth, textHeight + 4);
+        overlayCtx.fillRect(det.x1, det.y1 - textHeight, textWidth, textHeight);
 
-        // Draw label text
         overlayCtx.fillStyle = '#ffffff';
-        overlayCtx.fillText(label, det.x1 + 5, det.y1 - 8);
+        overlayCtx.fillText(label, det.x1 + 5, det.y1 - 5);
       });
+
+      // FPS calculation
+      frameCountRef.current++;
+      const now = performance.now();
+      if (now - lastTimeRef.current >= 1000) {
+        setFps(frameCountRef.current);
+        frameCountRef.current = 0;
+        lastTimeRef.current = now;
+      }
     } catch (err) {
       console.error('Inference error:', err);
     }
 
-    // Calculate FPS
-    frameCountRef.current++;
-    const now = performance.now();
-    if (now - lastTimeRef.current >= 1000) {
-      setFps(frameCountRef.current);
-      frameCountRef.current = 0;
-      lastTimeRef.current = now;
-    }
-
     animFrameRef.current = requestAnimationFrame(runDetection);
-  }, []);
+  }, [cameraActive]);
 
-  // Start/stop detection
   const toggleDetection = useCallback(() => {
     if (state === 'detecting') {
-      if (animFrameRef.current) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = 0;
-      }
+      cancelAnimationFrame(animFrameRef.current);
       setState('ready');
-      setDetections([]);
       setFps(0);
+      setDetections([]);
       const overlay = overlayRef.current;
       if (overlay) {
         const ctx = overlay.getContext('2d');
         ctx?.clearRect(0, 0, overlay.width, overlay.height);
       }
-    } else {
-      setState('detecting');
-      lastTimeRef.current = performance.now();
-      frameCountRef.current = 0;
-      runDetection();
+    } else if (state === 'ready') {
+      if (!cameraActive) {
+        startCamera().then(() => {
+          setState('detecting');
+          lastTimeRef.current = performance.now();
+          frameCountRef.current = 0;
+          animFrameRef.current = requestAnimationFrame(runDetection);
+        });
+      } else {
+        setState('detecting');
+        lastTimeRef.current = performance.now();
+        frameCountRef.current = 0;
+        animFrameRef.current = requestAnimationFrame(runDetection);
+      }
     }
-  }, [state, runDetection]);
+  }, [state, cameraActive, startCamera, runDetection]);
 
-  // Handle file upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      loadModel(file);
-    }
-  };
-
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      cancelAnimationFrame(animFrameRef.current);
       stopCamera();
       if (sessionRef.current) {
         sessionRef.current.release();
@@ -348,31 +320,37 @@ export default function App() {
     };
   }, [stopCamera]);
 
-  // Auto-start camera when model is ready
-  useEffect(() => {
-    if (state === 'ready' && !cameraActive) {
-      startCamera();
-    }
-  }, [state, cameraActive, startCamera]);
+  // Show loading screen while ORT initializes
+  if (!ortReady) {
+    return (
+      <div className="h-screen w-screen bg-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-10 h-10 border-3 border-slate-700 border-t-orange-500 rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-slate-400 text-sm">Loading ONNX Runtime...</p>
+          {errorMsg && (
+            <p className="text-red-400 text-xs mt-4 max-w-xs">{errorMsg}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen bg-slate-900 flex flex-col overflow-hidden">
-      {/* HTTPS Warning */}
       {!isSecure && (
         <div className="bg-yellow-600 text-white text-xs px-4 py-2 text-center font-medium">
           ⚠️ Camera requires HTTPS. Please access this page via HTTPS or localhost.
         </div>
       )}
       
-      {/* Header */}
       <div className="bg-slate-800 px-4 py-3 flex items-center justify-between border-b border-slate-700 z-10">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center">
-            🔥
-          </div>
+          <span className="text-2xl">🔥</span>
           <div>
-            <h1 className="text-white font-bold text-sm leading-tight">Fire & Smoke Detector</h1>
-            <p className="text-slate-400 text-xs">YOLOv10 ONNX • Real-time</p>
+            <h1 className="text-white font-bold text-sm">Fire & Smoke Detector</h1>
+            {modelName && (
+              <p className="text-slate-400 text-xs truncate max-w-[200px]">{modelName}</p>
+            )}
           </div>
         </div>
         {state === 'detecting' && (
@@ -383,9 +361,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Main content */}
       <div className="flex-1 relative overflow-hidden">
-        {/* Video element (hidden, used as source for canvas) */}
         <video
           ref={videoRef}
           className="hidden"
@@ -393,24 +369,20 @@ export default function App() {
           muted
         />
 
-        {/* Main display canvas - shows video + detections */}
         <canvas
           ref={canvasRef}
           className="absolute top-0 left-0 w-full h-full object-cover"
           style={{ display: cameraActive ? 'block' : 'none' }}
         />
 
-        {/* Overlay canvas for detection boxes */}
         <canvas
           ref={overlayRef}
           className="absolute top-0 left-0 w-full h-full object-cover pointer-events-none"
           style={{ display: cameraActive ? 'block' : 'none' }}
         />
 
-        {/* Hidden preprocess canvas */}
         <canvas ref={preprocessCanvasRef} className="hidden" />
 
-        {/* Idle state - Model upload */}
         {(state === 'idle' || state === 'error' || state === 'loading-model') && (
           <div className="absolute inset-0 flex items-center justify-center p-6">
             <div className="bg-slate-800 rounded-2xl p-8 max-w-sm w-full shadow-2xl border border-slate-700">
@@ -420,7 +392,7 @@ export default function App() {
                 </div>
                 <h2 className="text-white text-xl font-bold mb-2">Fire & Smoke Detection</h2>
                 <p className="text-slate-400 text-sm">
-                  Load your YOLOv10n ONNX model to start detecting fire and smoke in real-time using your camera.
+                  Load your YOLOv10n ONNX model to start detecting fire and smoke in real-time.
                 </p>
               </div>
 
@@ -456,70 +428,50 @@ export default function App() {
               <div className="mt-6 p-3 bg-slate-700/50 rounded-lg">
                 <p className="text-slate-400 text-xs leading-relaxed">
                   💡 <strong className="text-slate-300">Tips:</strong> Use HTTPS or localhost for camera access. 
-                  Works best on mobile Chrome/Safari. The model runs entirely in your browser - no data is sent anywhere.
-                </p>
-                <p className="text-slate-500 text-xs mt-2">
-                  {wasmReady ? '✅ Runtime ready' : '⏳ Initializing runtime...'}
+                  Works best on mobile Chrome/Safari. The model runs entirely in your browser.
                 </p>
               </div>
             </div>
           </div>
         )}
 
-        {/* Detection results overlay */}
-        {state === 'detecting' && detections.length > 0 && (
-          <div className="absolute bottom-20 left-4 right-4 z-10">
-            <div className="bg-slate-800/90 backdrop-blur-sm rounded-xl p-3 border border-slate-700">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-white text-xs font-bold">
-                  {detections.length} Detection{detections.length > 1 ? 's' : ''}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {detections.map((det, i) => (
-                  <div
-                    key={i}
-                    className="px-2 py-1 rounded-md text-xs font-medium"
-                    style={{
-                      backgroundColor: (CLASS_COLORS[det.label] || '#22c55e') + '33',
-                      color: CLASS_COLORS[det.label] || '#22c55e',
-                      border: `1px solid ${CLASS_COLORS[det.label] || '#22c55e'}55`,
-                    }}
-                  >
-                    {det.label === 'fire' ? '🔥' : '💨'} {det.label} {(det.confidence * 100).toFixed(0)}%
-                  </div>
-                ))}
-              </div>
+        {state === 'ready' && !cameraActive && (
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="bg-slate-800/90 rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-slate-700 text-center">
+              <div className="text-4xl mb-3">📷</div>
+              <h3 className="text-white font-bold mb-2">Model Ready!</h3>
+              <p className="text-slate-400 text-sm mb-4">
+                Click "Start Detection" to enable camera and begin real-time detection.
+              </p>
+              <button
+                onClick={toggleDetection}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-orange-500 to-red-600 text-white font-bold text-sm active:opacity-90"
+              >
+                ▶ Start Detection
+              </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Bottom controls */}
-      {state !== 'idle' && state !== 'loading-model' && state !== 'error' && (
-        <div className="bg-slate-800 border-t border-slate-700 px-4 py-3 z-10">
-          {/* Model info */}
-          {modelInfo && (
-            <div className="mb-2">
-              <div className="text-xs text-slate-500 truncate">
-                📦 {modelName}
-              </div>
-              {showDebug && modelInfo.outputDims && (
-                <div className="text-xs text-slate-600 mt-1 font-mono">
-                  Output shape: {modelInfo.outputDims}
-                </div>
-              )}
-              <button
-                onClick={() => setShowDebug(!showDebug)}
-                className="text-xs text-slate-600 underline mt-0.5"
-              >
-                {showDebug ? 'Hide' : 'Show'} debug info
-              </button>
+      {(state === 'ready' || state === 'detecting') && (
+        <div className="bg-slate-800 px-4 py-3 border-t border-slate-700 z-10">
+          {showDebug && modelInfo && (
+            <div className="mb-3 p-2 bg-slate-900 rounded-lg text-xs font-mono text-slate-400">
+              <div>Input: {modelInfo.inputs}</div>
+              <div>Output: {modelInfo.outputs}</div>
+              {modelInfo.outputDims && <div>Output shape: {modelInfo.outputDims}</div>}
+              <div>Detections: {detections.length}</div>
             </div>
           )}
 
-          {/* Confidence slider */}
+          <button
+            onClick={() => setShowDebug(!showDebug)}
+            className="text-xs text-slate-500 mb-2 underline"
+          >
+            {showDebug ? 'Hide' : 'Show'} Debug Info
+          </button>
+
           <div className="flex items-center gap-3 mb-3">
             <span className="text-slate-400 text-xs whitespace-nowrap">Confidence</span>
             <input
@@ -536,7 +488,6 @@ export default function App() {
             </span>
           </div>
 
-          {/* Action buttons */}
           <div className="flex gap-3">
             <button
               onClick={toggleDetection}
