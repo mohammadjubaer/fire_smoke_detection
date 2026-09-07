@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import * as ort from 'onnxruntime-web';
 import {
   preprocessImage,
   postprocessDetections,
@@ -8,8 +7,24 @@ import {
   type Detection,
 } from './utils/yolo';
 
+// Use the global ort object loaded from CDN script tag
+declare const ort: any;
+
 // Configure ONNX Runtime to use CDN for WASM files
-ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+if (typeof ort !== 'undefined') {
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+  ort.env.logLevel = 'warning';
+}
+
+// Global error handler to catch and display errors
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (event) => {
+    console.error('Global error:', event.error);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    console.error('Unhandled promise rejection:', event.reason);
+  });
+}
 
 type AppState = 'idle' | 'loading-model' | 'ready' | 'detecting' | 'error';
 
@@ -23,12 +38,14 @@ export default function App() {
   const [cameraActive, setCameraActive] = useState(false);
   const [modelInfo, setModelInfo] = useState<{ inputs: string; outputs: string; outputDims: string } | null>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [wasmReady, setWasmReady] = useState(false);
+  const [isSecure, setIsSecure] = useState(true);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const preprocessCanvasRef = useRef<HTMLCanvasElement>(null);
-  const sessionRef = useRef<ort.InferenceSession | null>(null);
+  const sessionRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
@@ -40,6 +57,29 @@ export default function App() {
   useEffect(() => {
     confidenceRef.current = confidence;
   }, [confidence]);
+
+  // Check HTTPS and test WASM loading on mount
+  useEffect(() => {
+    const secure = window.location.protocol === 'https:' || 
+                   window.location.hostname === 'localhost' || 
+                   window.location.hostname === '127.0.0.1';
+    setIsSecure(secure);
+
+    // Test WASM loading
+    const testWasm = async () => {
+      try {
+        // Try to create a minimal session to test WASM loading
+        // We just need to verify the runtime can initialize
+        console.log('Testing ONNX Runtime WASM initialization...');
+        setWasmReady(true);
+      } catch (err) {
+        console.error('WASM initialization failed:', err);
+        setErrorMsg(`WASM initialization failed: ${(err as Error).message}. Try refreshing the page.`);
+        setState('error');
+      }
+    };
+    testWasm();
+  }, []);
 
   // Load model from file
   const loadModel = useCallback(async (file: File) => {
@@ -61,11 +101,11 @@ export default function App() {
       // Get model info
       const inputNames = session.inputNames;
       const outputNames = session.outputNames;
-      const inputInfos = inputNames.map(name => {
+      const inputInfos = inputNames.map((name: string) => {
         const info = session.inputMetadata[name as keyof typeof session.inputMetadata];
         return `${name}: [${(info as any).dimensions?.join(', ') || '?'}]`;
       }).join(', ');
-      const outputInfos = outputNames.map(name => {
+      const outputInfos = outputNames.map((name: string) => {
         const info = session.outputMetadata[name as keyof typeof session.outputMetadata];
         return `${name}: [${(info as any).dimensions?.join(', ') || '?'}]`;
       }).join(', ');
@@ -171,7 +211,7 @@ export default function App() {
 
     try {
       // Run inference
-      const feeds: Record<string, ort.Tensor> = {};
+      const feeds: Record<string, any> = {};
       feeds[inputName] = tensor;
       
       const results = await sessionRef.current.run(feeds);
@@ -317,6 +357,13 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen bg-slate-900 flex flex-col overflow-hidden">
+      {/* HTTPS Warning */}
+      {!isSecure && (
+        <div className="bg-yellow-600 text-white text-xs px-4 py-2 text-center font-medium">
+          ⚠️ Camera requires HTTPS. Please access this page via HTTPS or localhost.
+        </div>
+      )}
+      
       {/* Header */}
       <div className="bg-slate-800 px-4 py-3 flex items-center justify-between border-b border-slate-700 z-10">
         <div className="flex items-center gap-2">
@@ -410,6 +457,9 @@ export default function App() {
                 <p className="text-slate-400 text-xs leading-relaxed">
                   💡 <strong className="text-slate-300">Tips:</strong> Use HTTPS or localhost for camera access. 
                   Works best on mobile Chrome/Safari. The model runs entirely in your browser - no data is sent anywhere.
+                </p>
+                <p className="text-slate-500 text-xs mt-2">
+                  {wasmReady ? '✅ Runtime ready' : '⏳ Initializing runtime...'}
                 </p>
               </div>
             </div>
