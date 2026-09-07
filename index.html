@@ -1,35 +1,79 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <title>Fire & Smoke Detector - YOLOv10</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #0f172a;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      }
-    </style>
-    <!-- Load ONNX Runtime from CDN (blocks until loaded, before module scripts) -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
-    <script>
-      // Configure ORT WASM paths immediately after loading
-      if (typeof ort !== 'undefined') {
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
-        ort.env.logLevel = 'warning';
-        window.__ORT_READY__ = true;
-      }
-    </script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Fire & Smoke Detector</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: white;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+    #loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 20px;
+    }
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 4px solid #334155;
+      border-top-color: #f97316;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    #error {
+      display: none;
+      padding: 20px;
+      background: #991b1b;
+      border-radius: 8px;
+      max-width: 400px;
+      margin: 20px auto;
+    }
+    #root {
+      height: 100vh;
+      width: 100vw;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div>Loading Fire & Smoke Detector...</div>
+  </div>
+  <div id="error"></div>
+  <div id="root"></div>
+  
+  <script>
+    // Global error handler
+    window.addEventListener('error', function(e) {
+      console.error('Global error:', e.error);
+      document.getElementById('loading').style.display = 'none';
+      const errorDiv = document.getElementById('error');
+      errorDiv.style.display = 'block';
+      errorDiv.innerHTML = '<h3>Error Loading Application</h3><p>' + (e.message || 'Unknown error') + '</p>';
+    });
+    
+    window.addEventListener('unhandledrejection', function(e) {
+      console.error('Unhandled promise rejection:', e.reason);
+      document.getElementById('loading').style.display = 'none';
+      const errorDiv = document.getElementById('error');
+      errorDiv.style.display = 'block';
+      errorDiv.innerHTML = '<h3>Error Loading Application</h3><p>' + (e.reason?.message || 'Unknown error') + '</p>';
+    });
+  </script>
+  
+  <script type="module" src="/src/main.tsx"></script>
+</body>
 </html>
